@@ -1,81 +1,92 @@
 # Asynchronous Payment Processing Service
 
-Production-like microservice for asynchronous payment processing with transactional outbox, RabbitMQ delivery guarantees, idempotent create API, consumer retries, webhook retries, and DLQ handling.
+Production-like asynchronous payment processing microservice built for a backend engineering test assignment.
 
-## Stack
+The service accepts payment creation requests, guarantees idempotent API behavior, persists events with the outbox pattern, publishes them to RabbitMQ, processes events in a single consumer, and delivers webhook notifications with robust retry behavior.
 
+## Highlights
+
+- `POST /api/v1/payments` with mandatory `Idempotency-Key`
+- `GET /api/v1/payments/{payment_id}`
+- `X-API-Key` required for all endpoints (including `/health`)
+- Transactional outbox (`payments` + `outbox` in one DB transaction)
+- RabbitMQ topology: main queue, retry queue, DLQ
+- Single consumer with bounded retries and exponential backoff
+- External gateway emulation: 2-5s latency, ~90% success / ~10% failure
+- Webhook delivery retries + DB lock to prevent duplicate side effects
+- Alembic migrations, Docker Compose stack, OpenAPI/Swagger, healthcheck
+- Unit + integration tests, linting, formatting, type-checking
+
+## Technology Stack
+
+- Python 3.12
 - FastAPI
 - Pydantic v2
 - SQLAlchemy 2.0 (async)
 - PostgreSQL
 - RabbitMQ + FastStream
 - Alembic
-- Docker + docker-compose
 - pytest / pytest-asyncio / httpx
-- ruff / mypy
+- Ruff / mypy
+- Docker / docker-compose
 
-## What is implemented
+## Architecture
 
-- `POST /api/v1/payments` (requires `X-API-Key` and `Idempotency-Key`, returns `202 Accepted`)
-- `GET /api/v1/payments/{payment_id}`
-- `GET /health`
-- Static API key auth on all endpoints
-- Payment idempotency with DB unique constraint + upsert logic
-- Transactional write of `payments` and `outbox`
-- Outbox relay loop in API process (no extra container required)
-- RabbitMQ topology with main queue, retry queue, and DLQ
-- Single consumer that processes payment and sends webhook
-- Gateway emulator (2-5 seconds, 90% success / 10% fail)
-- Webhook client with 3 attempts + exponential backoff
-- Consumer retry with exponential delays and explicit DLQ routing after max retries
-- Unit + integration tests
+### End-to-end flow
 
-## Architecture overview
+1. Client calls `POST /api/v1/payments` with `Idempotency-Key`.
+2. API service writes:
+   - payment row (`payments`),
+   - domain event row (`outbox`),
+   in a single DB transaction.
+3. Background outbox relay polls pending outbox rows and publishes to RabbitMQ.
+4. Consumer receives `payment.created` event and executes processing workflow:
+   - gateway emulation,
+   - payment status update,
+   - webhook delivery.
+5. If processing fails, message is republished to retry queue with exponential TTL.
+6. After retry limit is reached, message is moved to DLQ.
 
-Flow:
+### Service boundaries
 
-1. API receives payment creation request.
-2. Service writes `payments` and `outbox` in one DB transaction.
-3. Outbox relay polls pending outbox rows and publishes to RabbitMQ (`payments.exchange` + `payments.new`).
-4. Consumer receives message from `payments.new`.
-5. Consumer calls gateway emulator (2-5 seconds, 90/10), updates payment status.
-6. Consumer sends webhook with retry/backoff.
-7. If processing fails, message is sent to retry queue with TTL-based delay; after 3 attempts it goes to DLQ.
+- `app/api/*`: HTTP transport layer (routing, dependencies, error mapping)
+- `app/application/*`: business workflows (payment creation, processing orchestration)
+- `app/infrastructure/*`: Rabbit topology, outbox relay, repositories, webhook client
+- `app/db/*`: ORM models and session management
+- `app/domain/*`: enums and domain-level exceptions
 
-### RabbitMQ topology
+### Outbox guarantees
 
-- `payments.exchange` (direct)
-  - queue `payments.new`
-- `payments.retry` (direct)
-  - queue `payments.new.retry` with dead-letter to `payments.exchange`
-- `payments.dlx` (direct)
-  - queue `payments.new.dlq`
+- `payments` and `outbox` are written atomically.
+- Outbox events are marked `published` only after successful publish to RabbitMQ.
+- Relay uses lock metadata to avoid concurrent duplicate publication.
 
-### Retry and DLQ policy
+### Idempotency guarantees
 
-- Webhook retry: 3 attempts, delays `1s`, `2s`, `4s` (configurable).
-- Consumer message retry: if processing raises retryable error, message is republished to retry exchange with TTL (`1s`, `2s`, `4s`).
-- Message flow is bounded and deterministic:
-  - original delivery has `x-retry-count=0`;
-  - failed attempts are republished with `x-retry-count=1..3`;
-  - when `x-retry-count` reaches configured max (`CONSUMER_RETRY_ATTEMPTS`), message is moved to DLQ;
-  - no infinite requeue loops are used.
+- API-level idempotency enforced by mandatory `Idempotency-Key`.
+- DB-level idempotency enforced by unique constraint on `payments.idempotency_key`.
+- Concurrent identical create requests return the same payment.
 
-### Idempotency policy
+### Retry and DLQ guarantees
 
-- `Idempotency-Key` is mandatory for payment creation.
-- `payments.idempotency_key` has unique constraint.
-- Creation uses `INSERT ... ON CONFLICT DO NOTHING` and returns existing payment if duplicate key is used.
-- Parallel identical requests return the same payment and do not create duplicate outbox messages.
-- Consumer-side duplicate deliveries are also controlled for webhook side effects by lock-based webhook coordination in DB.
+- Consumer uses explicit retry queue (not infinite broker requeue).
+- Retry count is tracked via `x-retry-count` header.
+- Delays are exponential (`base * 2^(n-1)`).
+- Message goes to DLQ when max retry count is reached.
 
-## Repository structure
+### Webhook side-effect safety
+
+- Webhook delivery is additionally guarded by DB lock fields:
+  - `webhook_lock_id`
+  - `webhook_locked_at`
+- This prevents duplicate webhook side effects on concurrent redelivery.
+
+## Repository Structure
 
 ```text
 .
   app/
     api/
-      routes/
     application/
     db/
     domain/
@@ -96,44 +107,64 @@ Flow:
   README.md
 ```
 
-## Environment variables
+## Environment Setup
 
-Compose uses `.env.example` directly as env file for `api` and `consumer`.
+The compose setup uses `.env.example` directly for `api` and `consumer` services.
 
 | Variable | Purpose |
 | --- | --- |
-| `APP_NAME` | Application name for metadata/health |
-| `APP_VERSION` | Application version for metadata/health |
-| `ENVIRONMENT` | Runtime environment marker (`local/dev/test/prod`) |
+| `APP_NAME` | Service name in metadata/health |
+| `APP_VERSION` | Service version |
+| `ENVIRONMENT` | Runtime environment flag |
 | `DEBUG` | Debug logging mode |
 | `API_HOST` | API bind host |
 | `API_PORT` | API bind port |
-| `API_KEY` | Static API key required on all endpoints |
-| `DATABASE_URL` | SQLAlchemy async DB URL |
-| `RABBITMQ_URL` | RabbitMQ broker URL |
-| `PAYMENTS_EXCHANGE` | Main exchange for payment-created events |
+| `API_KEY` | Static API key for all endpoints |
+| `DATABASE_URL` | Async SQLAlchemy DB URL |
+| `RABBITMQ_URL` | RabbitMQ connection URL |
+| `PAYMENTS_EXCHANGE` | Main exchange for new payment events |
 | `PAYMENTS_ROUTING_KEY` | Routing key for payment events |
-| `PAYMENTS_QUEUE` | Main consumer queue (`payments.new`) |
+| `PAYMENTS_QUEUE` | Main processing queue |
 | `PAYMENTS_RETRY_EXCHANGE` | Retry exchange |
 | `PAYMENTS_RETRY_QUEUE` | Retry queue |
 | `PAYMENTS_DLX_EXCHANGE` | Dead-letter exchange |
 | `PAYMENTS_DLQ` | Dead-letter queue |
-| `ENABLE_BROKER_STARTUP` | Enables broker connection on API startup |
-| `ENABLE_OUTBOX_RELAY` | Enables outbox relay background loop in API |
-| `CONSUMER_RETRY_ATTEMPTS` | Max message retry count before DLQ |
+| `ENABLE_BROKER_STARTUP` | Enables broker connect on API startup |
+| `ENABLE_OUTBOX_RELAY` | Enables outbox relay in API process |
+| `CONSUMER_RETRY_ATTEMPTS` | Max retry count before DLQ |
 | `CONSUMER_RETRY_BASE_DELAY_SECONDS` | Base delay for consumer retry backoff |
-| `OUTBOX_POLL_INTERVAL_SECONDS` | Relay polling interval |
-| `OUTBOX_BATCH_SIZE` | Relay batch size |
-| `OUTBOX_LOCK_TTL_SECONDS` | Outbox lock timeout for stuck messages |
-| `WEBHOOK_TIMEOUT_SECONDS` | Per-request webhook timeout |
+| `OUTBOX_POLL_INTERVAL_SECONDS` | Relay poll interval |
+| `OUTBOX_BATCH_SIZE` | Relay publish batch size |
+| `OUTBOX_LOCK_TTL_SECONDS` | Outbox lock TTL |
+| `WEBHOOK_TIMEOUT_SECONDS` | Webhook request timeout |
 | `WEBHOOK_RETRY_ATTEMPTS` | Webhook retry attempts |
-| `WEBHOOK_RETRY_BASE_DELAY_SECONDS` | Base delay for webhook retry backoff |
-| `WEBHOOK_LOCK_TTL_SECONDS` | TTL for webhook-side effect lock in DB |
-| `GATEWAY_SLEEP_MIN_SECONDS` | Gateway emulator min delay |
-| `GATEWAY_SLEEP_MAX_SECONDS` | Gateway emulator max delay |
+| `WEBHOOK_RETRY_BASE_DELAY_SECONDS` | Base delay for webhook retry |
+| `WEBHOOK_LOCK_TTL_SECONDS` | DB lock TTL for webhook side effects |
+| `GATEWAY_SLEEP_MIN_SECONDS` | Gateway emulator min latency |
+| `GATEWAY_SLEEP_MAX_SECONDS` | Gateway emulator max latency |
 | `GATEWAY_SUCCESS_RATE` | Gateway success probability |
 
-## Local run (without Docker)
+## Quick Start (Docker)
+
+1. Review `.env.example` (especially `API_KEY`).
+2. Start stack:
+
+```bash
+make up
+```
+
+3. Open docs:
+
+- Swagger UI: `http://localhost:8000/docs`
+- OpenAPI JSON: `http://localhost:8000/openapi.json`
+
+4. Stop stack:
+
+```bash
+make down
+```
+
+## Local Development (without app containers)
 
 1. Install dependencies:
 
@@ -141,54 +172,28 @@ Compose uses `.env.example` directly as env file for `api` and `consumer`.
 make install-dev
 ```
 
-2. Start PostgreSQL and RabbitMQ locally (or via docker compose only for infra).
-
-3. Run migrations:
+2. Start infra (PostgreSQL + RabbitMQ) via Docker Compose if needed.
+3. Apply migrations:
 
 ```bash
 make migrate
 ```
 
-4. Start API:
+4. Run API:
 
 ```bash
 make run-api
 ```
 
-5. Start consumer in another terminal:
+5. Run consumer (separate terminal):
 
 ```bash
 make run-consumer
 ```
 
-## Docker run
+## API Examples
 
-1. Review and adjust `.env.example` values (especially `API_KEY`) if needed.
-
-```bash
-vim .env.example
-```
-
-2. Start all services:
-
-```bash
-make up
-```
-
-3. Check API docs:
-
-- Swagger UI: `http://localhost:8000/docs`
-- OpenAPI JSON: `http://localhost:8000/openapi.json`
-
-4. Stop services:
-
-```bash
-make down
-```
-
-## API examples
-
-Use the same API key as configured in `.env.example`.
+Use `API_KEY` from `.env.example`.
 
 ### Healthcheck
 
@@ -197,7 +202,7 @@ curl -X GET "http://localhost:8000/health" \
   -H "X-API-Key: change-me-api-key"
 ```
 
-### Create payment
+### Create Payment
 
 ```bash
 curl -X POST "http://localhost:8000/api/v1/payments" \
@@ -213,59 +218,54 @@ curl -X POST "http://localhost:8000/api/v1/payments" \
   }'
 ```
 
-### Get payment
+### Get Payment
 
 ```bash
 curl -X GET "http://localhost:8000/api/v1/payments/<payment_id>" \
   -H "X-API-Key: change-me-api-key"
 ```
 
-## How to inspect RabbitMQ and DLQ
+## Quality Commands
 
-- RabbitMQ management UI: `http://localhost:15672`
-- Default credentials: `guest/guest`
-- Check queues:
-  - `payments.new`
-  - `payments.new.retry`
-  - `payments.new.dlq`
+### Tests
 
-## Quality checks
+```bash
+make test
+make test-unit
+make test-integration
+```
+
+### Lint / Format / Type-check
 
 ```bash
 make lint
 make format
 make type-check
-make test
 ```
 
-## Tests
+## How to Validate Main Scenario
 
-- Unit tests:
+1. Start stack (`make up`).
+2. Create payment via `POST /api/v1/payments`.
+3. Observe logs:
 
 ```bash
-make test-unit
+make logs
 ```
 
-- Integration tests:
+4. Check queues in RabbitMQ UI: `http://localhost:15672`
+   - `payments.new`
+   - `payments.new.retry`
+   - `payments.new.dlq`
+5. Query payment status with `GET /api/v1/payments/{payment_id}`.
 
-```bash
-make test-integration
-```
+## Engineering Trade-offs
 
-Covered scenarios include:
+- Outbox relay runs in API process to keep deployment topology minimal and test-task scope pragmatic.
+- Retry/DLQ logic is explicit and bounded instead of relying on opaque broker redelivery behavior.
+- Integration tests focus on service contracts and critical behavior under deterministic setup; full infra e2e can be added if required for production hardening.
 
-- API auth and idempotency
-- payment + outbox write integrity
-- outbox relay publishing
-- gateway behavior
-- webhook retry/backoff
-- consumer status update and retry/DLQ flow
-- RabbitMQ topology declaration contract (exchange/queue/binding wiring)
-- API-key dependency behavior and health endpoint contract
+## Submission Notes
 
-## Notes and assumptions
-
-- Outbox relay runs inside API process as background task by design to keep compose topology minimal (`postgres`, `rabbitmq`, `api`, `consumer`).
-- Consumer retry is explicit (retry queue with TTL and dead-letter back to main exchange), not implicit broker redelivery.
-- If webhook fails after retries, processing is treated as retryable at consumer message level and message follows retry/DLQ policy.
-- Webhook delivery is guarded by a DB lock (`webhook_lock_id` / `webhook_locked_at`) so duplicate message deliveries do not trigger duplicate webhook side effects.
+- The project is intentionally production-like but not overengineered.
+- Core guarantees (idempotency, outbox, retries, DLQ, authenticated API) are implemented explicitly and tested.

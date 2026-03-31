@@ -1,6 +1,6 @@
 PYTHON ?= python
 
-.PHONY: install install-dev run-api run-consumer migrate test test-unit test-integration lint format type-check up down logs
+.PHONY: install install-dev run-api run-consumer migrate test test-unit test-integration lint format type-check check up down logs smoke
 
 install:
 	$(PYTHON) -m pip install .
@@ -34,6 +34,11 @@ format:
 
 type-check:
 	$(PYTHON) -m mypy .
+
+check: lint type-check test
+
+smoke:
+	$(PYTHON) -m pytest tests/integration/test_api.py::test_create_payment_and_get_details -q
 
 up:
 	docker compose up --build -d

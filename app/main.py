@@ -40,9 +40,15 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             yield
         finally:
             if app_settings.enable_outbox_relay:
-                await relay.stop()
+                try:
+                    await relay.stop()
+                except Exception:
+                    logging.getLogger(__name__).exception("Failed to stop outbox relay cleanly")
             if broker_started:
-                await broker.close()
+                try:
+                    await broker.close()
+                except Exception:
+                    logging.getLogger(__name__).exception("Failed to close broker cleanly")
 
     app = FastAPI(
         title=app_settings.app_name,

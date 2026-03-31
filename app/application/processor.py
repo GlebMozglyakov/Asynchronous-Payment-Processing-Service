@@ -24,6 +24,7 @@ class PaymentProcessor:
 
     def __init__(self, session: AsyncSession) -> None:
         settings = get_settings()
+        self._settings = settings
         self._session = session
         self._payment_repo = PaymentRepository(session)
         self._gateway = PaymentGatewayEmulator(
@@ -109,7 +110,7 @@ class PaymentProcessor:
         acquired = await self._payment_repo.acquire_webhook_lock(
             payment_id=payment.id,
             lock_id=webhook_lock_id,
-            lock_ttl_seconds=get_settings().webhook_lock_ttl_seconds,
+            lock_ttl_seconds=self._settings.webhook_lock_ttl_seconds,
         )
         await self._session.commit()
 
@@ -166,7 +167,7 @@ class PaymentProcessor:
             )
             await self._payment_repo.update_webhook_result(
                 payment_id=payment.id,
-                attempts=get_settings().webhook_retry_attempts,
+                attempts=self._settings.webhook_retry_attempts,
                 delivered=False,
                 last_error=str(exc),
             )

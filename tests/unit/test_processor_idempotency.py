@@ -81,6 +81,39 @@ async def test_processor_raises_retryable_error_when_webhook_lock_is_busy(
         await processor.process(_event(payment.id, payment.idempotency_key, payment.webhook_url))
 
 
+@pytest.mark.asyncio
+async def test_processor_releases_webhook_lock_after_success(
+    db_session: AsyncSession,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    payment = Payment(
+        id=uuid4(),
+        amount=Decimal("12.00"),
+        currency=Currency.USD,
+        description="release lock",
+        metadata_json={"order_id": "t-3"},
+        status=PaymentStatus.SUCCEEDED,
+        idempotency_key="idem-release",
+        webhook_url="https://merchant.local/webhook",
+        processed_at=datetime.now(UTC),
+    )
+    db_session.add(payment)
+    await db_session.commit()
+
+    monkeypatch.setattr(
+        "app.application.processor.WebhookClient.send",
+        AsyncMock(return_value=1),
+    )
+
+    processor = PaymentProcessor(db_session)
+    await processor.process(_event(payment.id, payment.idempotency_key, payment.webhook_url))
+
+    updated = await db_session.get(Payment, payment.id)
+    assert updated is not None
+    assert updated.webhook_lock_id is None
+    assert updated.webhook_locked_at is None
+
+
 def _event(
     payment_id: UUID,
     idempotency_key: str,

@@ -54,6 +54,8 @@ async def test_consumer_processes_message_and_updates_status(
         assert updated.processed_at is not None
         assert updated.webhook_attempts == 1
         assert updated.webhook_delivered_at is not None
+        assert updated.webhook_lock_id is None
+        assert updated.webhook_locked_at is None
 
 
 @pytest.mark.integration
