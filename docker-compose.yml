@@ -34,7 +34,7 @@ services:
       dockerfile: Dockerfile
     container_name: payments-api
     env_file:
-      - .env
+      - .env.example
     command: ["sh", "-c", "python -m alembic upgrade head && python -m app.main"]
     ports:
       - "8000:8000"
@@ -59,7 +59,7 @@ services:
       dockerfile: Dockerfile
     container_name: payments-consumer
     env_file:
-      - .env
+      - .env.example
     command: ["sh", "-c", "python -m alembic upgrade head && python -m app.consumer"]
     depends_on:
       postgres:

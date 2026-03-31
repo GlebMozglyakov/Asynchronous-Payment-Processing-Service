@@ -92,7 +92,7 @@ async def test_consumer_moves_to_dlq_after_max_retries(monkeypatch: pytest.Monke
     publish_mock.assert_awaited_once()
     assert publish_mock.await_args is not None
     kwargs = publish_mock.await_args.kwargs
-    assert kwargs["headers"]["x-retry-count"] == "4"
+    assert kwargs["headers"]["x-retry-count"] == "3"
     assert kwargs["headers"]["x-last-error"] == "final error"
 
 

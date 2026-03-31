@@ -93,16 +93,39 @@ Flow:
 
 ## Environment variables
 
-Copy `.env.example` to `.env` and adjust values if needed.
+Compose uses `.env.example` directly as env file for `api` and `consumer`.
 
-Critical settings:
-
-- `API_KEY`
-- `DATABASE_URL`
-- `RABBITMQ_URL`
-- `ENABLE_OUTBOX_RELAY`
-- `WEBHOOK_RETRY_ATTEMPTS`
-- `CONSUMER_RETRY_ATTEMPTS`
+| Variable | Purpose |
+| --- | --- |
+| `APP_NAME` | Application name for metadata/health |
+| `APP_VERSION` | Application version for metadata/health |
+| `ENVIRONMENT` | Runtime environment marker (`local/dev/test/prod`) |
+| `DEBUG` | Debug logging mode |
+| `API_HOST` | API bind host |
+| `API_PORT` | API bind port |
+| `API_KEY` | Static API key required on all endpoints |
+| `DATABASE_URL` | SQLAlchemy async DB URL |
+| `RABBITMQ_URL` | RabbitMQ broker URL |
+| `PAYMENTS_EXCHANGE` | Main exchange for payment-created events |
+| `PAYMENTS_ROUTING_KEY` | Routing key for payment events |
+| `PAYMENTS_QUEUE` | Main consumer queue (`payments.new`) |
+| `PAYMENTS_RETRY_EXCHANGE` | Retry exchange |
+| `PAYMENTS_RETRY_QUEUE` | Retry queue |
+| `PAYMENTS_DLX_EXCHANGE` | Dead-letter exchange |
+| `PAYMENTS_DLQ` | Dead-letter queue |
+| `ENABLE_BROKER_STARTUP` | Enables broker connection on API startup |
+| `ENABLE_OUTBOX_RELAY` | Enables outbox relay background loop in API |
+| `CONSUMER_RETRY_ATTEMPTS` | Max message retry count before DLQ |
+| `CONSUMER_RETRY_BASE_DELAY_SECONDS` | Base delay for consumer retry backoff |
+| `OUTBOX_POLL_INTERVAL_SECONDS` | Relay polling interval |
+| `OUTBOX_BATCH_SIZE` | Relay batch size |
+| `OUTBOX_LOCK_TTL_SECONDS` | Outbox lock timeout for stuck messages |
+| `WEBHOOK_TIMEOUT_SECONDS` | Per-request webhook timeout |
+| `WEBHOOK_RETRY_ATTEMPTS` | Webhook retry attempts |
+| `WEBHOOK_RETRY_BASE_DELAY_SECONDS` | Base delay for webhook retry backoff |
+| `GATEWAY_SLEEP_MIN_SECONDS` | Gateway emulator min delay |
+| `GATEWAY_SLEEP_MAX_SECONDS` | Gateway emulator max delay |
+| `GATEWAY_SUCCESS_RATE` | Gateway success probability |
 
 ## Local run (without Docker)
 
@@ -134,10 +157,10 @@ make run-consumer
 
 ## Docker run
 
-1. Copy env file:
+1. Review and adjust `.env.example` values (especially `API_KEY`) if needed.
 
 ```bash
-cp .env.example .env
+vim .env.example
 ```
 
 2. Start all services:
@@ -146,18 +169,12 @@ cp .env.example .env
 make up
 ```
 
-3. Apply migrations inside API container:
-
-```bash
-docker compose exec api python -m alembic upgrade head
-```
-
-4. Check API docs:
+3. Check API docs:
 
 - Swagger UI: `http://localhost:8000/docs`
 - OpenAPI JSON: `http://localhost:8000/openapi.json`
 
-5. Stop services:
+4. Stop services:
 
 ```bash
 make down
@@ -165,7 +182,7 @@ make down
 
 ## API examples
 
-Use same API key as in `.env`.
+Use the same API key as configured in `.env.example`.
 
 ### Healthcheck
 
@@ -237,6 +254,7 @@ Covered scenarios include:
 - gateway behavior
 - webhook retry/backoff
 - consumer status update and retry/DLQ flow
+- RabbitMQ topology declaration contract (exchange/queue/binding wiring)
 
 ## Notes and assumptions
 

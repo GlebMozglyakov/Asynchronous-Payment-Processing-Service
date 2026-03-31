@@ -75,14 +75,14 @@ async def _handle_retryable_error(
     retry_count: int,
     error_message: str,
 ) -> None:
-    if retry_count >= settings.consumer_retry_attempts - 1:
-        await _publish_to_dlq(event, retry_count + 1, error_message)
+    if retry_count >= settings.consumer_retry_attempts:
+        await _publish_to_dlq(event, retry_count, error_message)
         await message.ack()
         logger.error(
             "Message moved to DLQ after max retries",
             extra={
                 "payment_id": str(event.payment_id),
-                "retry_count": retry_count + 1,
+                "retry_count": retry_count,
                 "error": error_message,
             },
         )
