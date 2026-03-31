@@ -1,208 +1,282 @@
-# Asynchronous Payment Processing Service
+# Асинхронный сервис процессинга платежей
 
-Production-like asynchronous payment processing microservice built for a backend engineering test assignment.
+Production-like микросервис для тестового задания: принимает запросы на создание платежа, обрабатывает платеж асинхронно через очередь, обновляет статус в БД и отправляет webhook с retry-политикой.
 
-The service accepts payment creation requests, guarantees idempotent API behavior, persists events with the outbox pattern, publishes them to RabbitMQ, processes events in a single consumer, and delivers webhook notifications with robust retry behavior.
+Ключевые цели решения:
+- корректная идемпотентность на API и БД-уровне;
+- надежная публикация событий через Outbox pattern;
+- управляемые retry + DLQ для проблемных сообщений;
+- понятный запуск и проверка для ревьюера.
 
-## Highlights
+---
 
-- `POST /api/v1/payments` with mandatory `Idempotency-Key`
-- `GET /api/v1/payments/{payment_id}`
-- `X-API-Key` required for all endpoints (including `/health`)
-- Transactional outbox (`payments` + `outbox` in one DB transaction)
-- RabbitMQ topology: main queue, retry queue, DLQ
-- Single consumer with bounded retries and exponential backoff
-- External gateway emulation: 2-5s latency, ~90% success / ~10% failure
-- Webhook delivery retries + DB lock to prevent duplicate side effects
-- Alembic migrations, Docker Compose stack, OpenAPI/Swagger, healthcheck
-- Unit + integration tests, linting, formatting, type-checking
+## Что реализовано
 
-## Technology Stack
+- `POST /api/v1/payments` (создание платежа, `202 Accepted`)
+- `GET /api/v1/payments/{payment_id}` (получение текущего статуса)
+- `GET /health` (healthcheck)
+- обязательный `X-API-Key` для всех эндпоинтов
+- обязательный `Idempotency-Key` для создания платежа
+- асинхронный pipeline обработки платежа через RabbitMQ
+- consumer с эмуляцией gateway (2-5 секунд, ~90% успех / ~10% ошибка)
+- обновление статуса платежа в БД (`pending -> succeeded/failed`)
+- отправка webhook с retry и exponential backoff
+- Dead Letter Queue для сообщений после исчерпания retry
+- Outbox pattern для надежной публикации событий
+- миграции Alembic
+- Docker / docker-compose окружение
+- unit + integration тесты
+- OpenAPI/Swagger, линтеры, форматтер, type-check, Makefile-команды
 
-- Python 3.12
-- FastAPI
-- Pydantic v2
-- SQLAlchemy 2.0 (async)
-- PostgreSQL
-- RabbitMQ + FastStream
-- Alembic
-- pytest / pytest-asyncio / httpx
-- Ruff / mypy
-- Docker / docker-compose
+---
 
-## Architecture
+## Технологический стек
 
-### End-to-end flow
+- **FastAPI** — HTTP API и OpenAPI/Swagger
+- **Pydantic v2** — валидация входных/выходных контрактов
+- **SQLAlchemy 2.0 async** — работа с БД
+- **PostgreSQL** — хранилище платежей и outbox
+- **RabbitMQ + FastStream** — брокер и обработка сообщений
+- **Alembic** — миграции схемы БД
+- **Docker / docker-compose** — локальная инфраструктура и запуск
+- **pytest** — unit/integration тестирование
+- **ruff / mypy** — lint/format/type-check
 
-1. Client calls `POST /api/v1/payments` with `Idempotency-Key`.
-2. API service writes:
-   - payment row (`payments`),
-   - domain event row (`outbox`),
-   in a single DB transaction.
-3. Background outbox relay polls pending outbox rows and publishes to RabbitMQ.
-4. Consumer receives `payment.created` event and executes processing workflow:
-   - gateway emulation,
-   - payment status update,
-   - webhook delivery.
-5. If processing fails, message is republished to retry queue with exponential TTL.
-6. After retry limit is reached, message is moved to DLQ.
+---
 
-### Service boundaries
+## Архитектура
 
-- `app/api/*`: HTTP transport layer (routing, dependencies, error mapping)
-- `app/application/*`: business workflows (payment creation, processing orchestration)
-- `app/infrastructure/*`: Rabbit topology, outbox relay, repositories, webhook client
-- `app/db/*`: ORM models and session management
-- `app/domain/*`: enums and domain-level exceptions
+### Компоненты
 
-### Outbox guarantees
+- **API сервис** (`app/main.py`, `app/api/*`)
+  - принимает запросы;
+  - проверяет `X-API-Key` и `Idempotency-Key`;
+  - сохраняет платеж и outbox-событие в одной транзакции.
 
-- `payments` and `outbox` are written atomically.
-- Outbox events are marked `published` only after successful publish to RabbitMQ.
-- Relay uses lock metadata to avoid concurrent duplicate publication.
+- **PostgreSQL**
+  - таблица `payments` — состояние платежей;
+  - таблица `outbox` — события к публикации.
 
-### Idempotency guarantees
+- **Outbox relay** (`app/infrastructure/outbox_relay.py`)
+  - периодически читает `outbox`;
+  - публикует события в RabbitMQ;
+  - помечает событие как `published` только после успешной публикации.
 
-- API-level idempotency enforced by mandatory `Idempotency-Key`.
-- DB-level idempotency enforced by unique constraint on `payments.idempotency_key`.
-- Concurrent identical create requests return the same payment.
+- **RabbitMQ**
+  - основной exchange/queue для новых платежей;
+  - retry exchange/queue для отложенных повторов;
+  - DLX/DLQ для неисправимых сообщений.
 
-### Retry and DLQ guarantees
+- **Consumer** (`app/consumer.py`, `app/application/processor.py`)
+  - получает событие `payment.created`;
+  - вызывает эмулятор шлюза;
+  - обновляет платеж в БД;
+  - отправляет webhook;
+  - при ошибках применяет retry/DLQ.
 
-- Consumer uses explicit retry queue (not infinite broker requeue).
-- Retry count is tracked via `x-retry-count` header.
-- Delays are exponential (`base * 2^(n-1)`).
-- Message goes to DLQ when max retry count is reached.
+### Почему такая архитектура
 
-### Webhook side-effect safety
+- разделение API и async-обработки снижает latency ответа клиенту;
+- Outbox pattern повышает согласованность между БД и брокером;
+- явный retry + DLQ делает систему предсказуемой в эксплуатации;
+- идемпотентность снижает риск дублей при ретраях клиентов и сетевых сбоях.
 
-- Webhook delivery is additionally guarded by DB lock fields:
-  - `webhook_lock_id`
-  - `webhook_locked_at`
-- This prevents duplicate webhook side effects on concurrent redelivery.
+---
 
-## Repository Structure
+## Жизненный цикл платежа
+
+1. Клиент вызывает `POST /api/v1/payments`.
+2. API проверяет `X-API-Key` и `Idempotency-Key`.
+3. В одной транзакции сохраняются:
+   - запись платежа в `payments` со статусом `pending`,
+   - событие в `outbox`.
+4. Outbox relay публикует событие в RabbitMQ (`payments.new`).
+5. Consumer получает сообщение.
+6. Выполняется эмуляция внешнего gateway (2-5 сек, ~90/10).
+7. Статус платежа обновляется в БД (`succeeded` или `failed`).
+8. Отправляется webhook на URL из запроса.
+9. Если webhook не доставлен, выполняется retry с backoff.
+10. Если retry исчерпан, сообщение переводится в DLQ.
+
+---
+
+## Идемпотентность
+
+### Зачем
+
+Клиент может повторно отправить тот же запрос (таймаут, сетевой сбой, повторный клик). Без идемпотентности это даст дубли платежей.
+
+### Как реализовано
+
+- Заголовок `Idempotency-Key` обязателен для `POST /api/v1/payments`.
+- В `payments` есть уникальное ограничение `idempotency_key`.
+- Используется upsert (`INSERT ... ON CONFLICT DO NOTHING`), поэтому повторный запрос с тем же ключом возвращает существующий платеж.
+
+### Гарантии
+
+- повтор с тем же ключом не создаёт новый платеж;
+- конкурентные одинаковые запросы сходятся к одной записи.
+
+### Ограничения
+
+- ключ должен быть стабильно сформирован клиентом для одного бизнес-действия;
+- разные ключи = разные операции.
+
+---
+
+## Outbox pattern
+
+### Проблема, которую решает
+
+Наивный подход: "сначала записали платеж в БД, потом отправили сообщение". Если отправка в брокер упала, БД и очередь расходятся.
+
+### Как работает в проекте
+
+- в транзакции создаются и `payments`, и `outbox`;
+- отдельный relay читает `outbox` и публикует в RabbitMQ;
+- после успешной публикации событие помечается как `published`.
+
+### Что это дает
+
+- согласованность между состоянием БД и событиями;
+- устойчивость к временным сбоям брокера;
+- наблюдаемость: видно, какие события еще не опубликованы.
+
+---
+
+## Retry и DLQ
+
+### Что ретраится
+
+- обработка сообщения consumer-ом при retryable ошибках;
+- доставка webhook внутри processor (HTTP retry).
+
+### Политика retry для consumer
+
+- при ошибке сообщение републикуется в retry queue;
+- используется экспоненциальная задержка (`base * 2^(n-1)`);
+- счётчик хранится в `x-retry-count`.
+
+### Когда сообщение уходит в DLQ
+
+- если `x-retry-count` достигает лимита `CONSUMER_RETRY_ATTEMPTS`, сообщение отправляется в `payments.new.dlq`.
+
+### Зачем DLQ
+
+- не блокировать основной поток обработки;
+- сохранять "плохие" сообщения для анализа;
+- упрощать диагностику и ручной reprocess.
+
+---
+
+## Структура проекта
 
 ```text
 .
   app/
-    api/
-    application/
-    db/
-    domain/
-    infrastructure/
-    consumer.py
-    main.py
+    api/                # HTTP слой: роуты, зависимости, ошибки
+    application/        # бизнес-сценарии (create/process)
+    db/                 # ORM модели и session
+    domain/             # enums и доменные ошибки
+    infrastructure/     # RabbitMQ, outbox relay, репозитории, webhook, retry helper
+    consumer.py         # точка входа consumer
+    main.py             # точка входа API
   alembic/
-    versions/
+    versions/           # миграции
   tests/
     unit/
     integration/
   .env.example
-  alembic.ini
   docker-compose.yml
-  Dockerfile
   Makefile
   pyproject.toml
   README.md
 ```
 
-## Environment Setup
+---
 
-The compose setup uses `.env.example` directly for `api` and `consumer` services.
+## Быстрый старт (для ревьюера)
 
-| Variable | Purpose |
-| --- | --- |
-| `APP_NAME` | Service name in metadata/health |
-| `APP_VERSION` | Service version |
-| `ENVIRONMENT` | Runtime environment flag |
-| `DEBUG` | Debug logging mode |
-| `API_HOST` | API bind host |
-| `API_PORT` | API bind port |
-| `API_KEY` | Static API key for all endpoints |
-| `DATABASE_URL` | Async SQLAlchemy DB URL |
-| `RABBITMQ_URL` | RabbitMQ connection URL |
-| `PAYMENTS_EXCHANGE` | Main exchange for new payment events |
-| `PAYMENTS_ROUTING_KEY` | Routing key for payment events |
-| `PAYMENTS_QUEUE` | Main processing queue |
-| `PAYMENTS_RETRY_EXCHANGE` | Retry exchange |
-| `PAYMENTS_RETRY_QUEUE` | Retry queue |
-| `PAYMENTS_DLX_EXCHANGE` | Dead-letter exchange |
-| `PAYMENTS_DLQ` | Dead-letter queue |
-| `ENABLE_BROKER_STARTUP` | Enables broker connect on API startup |
-| `ENABLE_OUTBOX_RELAY` | Enables outbox relay in API process |
-| `CONSUMER_RETRY_ATTEMPTS` | Max retry count before DLQ |
-| `CONSUMER_RETRY_BASE_DELAY_SECONDS` | Base delay for consumer retry backoff |
-| `OUTBOX_POLL_INTERVAL_SECONDS` | Relay poll interval |
-| `OUTBOX_BATCH_SIZE` | Relay publish batch size |
-| `OUTBOX_LOCK_TTL_SECONDS` | Outbox lock TTL |
-| `WEBHOOK_TIMEOUT_SECONDS` | Webhook request timeout |
-| `WEBHOOK_RETRY_ATTEMPTS` | Webhook retry attempts |
-| `WEBHOOK_RETRY_BASE_DELAY_SECONDS` | Base delay for webhook retry |
-| `WEBHOOK_LOCK_TTL_SECONDS` | DB lock TTL for webhook side effects |
-| `GATEWAY_SLEEP_MIN_SECONDS` | Gateway emulator min latency |
-| `GATEWAY_SLEEP_MAX_SECONDS` | Gateway emulator max latency |
-| `GATEWAY_SUCCESS_RATE` | Gateway success probability |
+### 1) Подготовка
 
-## Quick Start (Docker)
+Проект использует `.env.example` как env-file для `api` и `consumer` в docker-compose.
 
-1. Review `.env.example` (especially `API_KEY`).
-2. Start stack:
+При необходимости измените `API_KEY` и другие параметры в `.env.example`.
+
+### 2) Запуск
 
 ```bash
 make up
 ```
 
-3. Open docs:
+Что поднимется:
+- `postgres`
+- `rabbitmq`
+- `api`
+- `consumer`
 
-- Swagger UI: `http://localhost:8000/docs`
-- OpenAPI JSON: `http://localhost:8000/openapi.json`
+Миграции применяются автоматически в командах `api` и `consumer`.
 
-4. Stop stack:
+### 3) Проверка, что сервис жив
 
-```bash
-make down
-```
+Swagger/OpenAPI:
+- `http://localhost:8000/docs`
+- `http://localhost:8000/openapi.json`
 
-## Local Development (without app containers)
-
-1. Install dependencies:
-
-```bash
-make install-dev
-```
-
-2. Start infra (PostgreSQL + RabbitMQ) via Docker Compose if needed.
-3. Apply migrations:
-
-```bash
-make migrate
-```
-
-4. Run API:
-
-```bash
-make run-api
-```
-
-5. Run consumer (separate terminal):
-
-```bash
-make run-consumer
-```
-
-## API Examples
-
-Use `API_KEY` from `.env.example`.
-
-### Healthcheck
+Healthcheck:
 
 ```bash
 curl -X GET "http://localhost:8000/health" \
   -H "X-API-Key: change-me-api-key"
 ```
 
-### Create Payment
+### 4) Остановка
+
+```bash
+make down
+```
+
+---
+
+## Локальная разработка (без запуска API/consumer в контейнерах)
+
+```bash
+make install-dev
+make migrate
+make run-api
+# в отдельном терминале
+make run-consumer
+```
+
+---
+
+## Команды разработки
+
+```bash
+make up                # поднять docker-окружение
+make down              # остановить и удалить volume
+make logs              # смотреть логи
+
+make migrate           # применить миграции
+
+make test              # все тесты
+make test-unit         # unit тесты
+make test-integration  # integration тесты
+make smoke             # быстрый smoke-сценарий
+
+make lint              # ruff check
+make format            # ruff format
+make type-check        # mypy
+make check             # lint + type-check + test
+```
+
+---
+
+## Примеры API-запросов
+
+Ниже используйте `API_KEY` из `.env.example`.
+
+### Создать платеж
 
 ```bash
 curl -X POST "http://localhost:8000/api/v1/payments" \
@@ -213,59 +287,137 @@ curl -X POST "http://localhost:8000/api/v1/payments" \
     "amount": "1500.00",
     "currency": "RUB",
     "description": "Order #123",
-    "metadata": {"order_id": "123", "customer_id": "abc"},
+    "metadata": {
+      "order_id": "123",
+      "customer_id": "abc"
+    },
     "webhook_url": "https://merchant.example.com/webhooks/payments"
   }'
 ```
 
-### Get Payment
+Пример ответа (`202`):
+
+```json
+{
+  "payment_id": "7ff44b4b-e78a-4bd9-a2ab-7d0772e80d16",
+  "status": "pending",
+  "created_at": "2026-03-31T12:00:00Z"
+}
+```
+
+### Получить платеж
 
 ```bash
-curl -X GET "http://localhost:8000/api/v1/payments/<payment_id>" \
+curl -X GET "http://localhost:8000/api/v1/payments/7ff44b4b-e78a-4bd9-a2ab-7d0772e80d16" \
   -H "X-API-Key: change-me-api-key"
 ```
 
-## Quality Commands
+Пример ответа (`200`):
 
-### Tests
+```json
+{
+  "payment_id": "7ff44b4b-e78a-4bd9-a2ab-7d0772e80d16",
+  "amount": "1500.00",
+  "currency": "RUB",
+  "description": "Order #123",
+  "metadata": {
+    "order_id": "123",
+    "customer_id": "abc"
+  },
+  "status": "succeeded",
+  "idempotency_key": "order-123-create",
+  "webhook_url": "https://merchant.example.com/webhooks/payments",
+  "failure_reason": null,
+  "created_at": "2026-03-31T12:00:00Z",
+  "processed_at": "2026-03-31T12:00:03Z"
+}
+```
+
+---
+
+## Тестирование
+
+### Что покрыто
+
+- **Unit**:
+  - валидация схем;
+  - idempotency в payment service;
+  - gateway-эмуляция;
+  - webhook retry;
+  - outbox relay;
+  - retry helper;
+  - security dependency;
+  - webhook lock;
+  - processor idempotency.
+
+- **Integration**:
+  - API контракты;
+  - auth / idempotency / race-сценарии;
+  - consumer retry/DLQ;
+  - контракт декларации RabbitMQ topology.
+
+### Запуск
 
 ```bash
 make test
+```
+
+Или выборочно:
+
+```bash
 make test-unit
 make test-integration
 ```
 
-### Lint / Format / Type-check
+---
 
-```bash
-make lint
-make format
-make type-check
-```
+## Как быстро проверить основной сценарий вручную
 
-## How to Validate Main Scenario
-
-1. Start stack (`make up`).
-2. Create payment via `POST /api/v1/payments`.
-3. Observe logs:
+1. `make up`
+2. Выполнить `POST /api/v1/payments` (пример выше)
+3. Скопировать `payment_id` из ответа
+4. Вызвать `GET /api/v1/payments/{payment_id}`
+5. Посмотреть логи:
 
 ```bash
 make logs
 ```
 
-4. Check queues in RabbitMQ UI: `http://localhost:15672`
+6. Проверить очереди в RabbitMQ UI: `http://localhost:15672`
    - `payments.new`
    - `payments.new.retry`
    - `payments.new.dlq`
-5. Query payment status with `GET /api/v1/payments/{payment_id}`.
 
-## Engineering Trade-offs
+---
 
-- Outbox relay runs in API process to keep deployment topology minimal and test-task scope pragmatic.
-- Retry/DLQ logic is explicit and bounded instead of relying on opaque broker redelivery behavior.
-- Integration tests focus on service contracts and critical behavior under deterministic setup; full infra e2e can be added if required for production hardening.
+## Trade-offs и потенциальные улучшения
 
-## Submission Notes
+Что сделано прагматично в рамках тестового задания:
+- outbox relay запущен внутри API-процесса (вместо отдельного publisher-сервиса);
+- интеграционные тесты ориентированы на контракты и критичные сценарии.
 
-- The project is intentionally production-like but not overengineered.
-- Core guarantees (idempotency, outbox, retries, DLQ, authenticated API) are implemented explicitly and tested.
+Что логично добавить для production:
+- подпись webhook (HMAC) и защита от replay;
+- централизованное secrets management;
+- полноценные метрики/трейсинг/алерты;
+- расширенная observability для outbox/retry/DLQ;
+- ручки/утилиты для reprocess DLQ;
+- более гибкая retry policy по типам ошибок.
+
+---
+
+## Заключение
+
+Проект реализует полный асинхронный контур обработки платежей с акцентом на надежность: идемпотентность, Outbox pattern, управляемые retry и DLQ.
+
+Для ревью достаточно:
+- поднять `make up`,
+- создать платеж,
+- посмотреть обработку и статус,
+- запустить `make check`.
+
+Ключевая логика находится в:
+- `app/application/payments.py`
+- `app/infrastructure/outbox_relay.py`
+- `app/application/processor.py`
+- `app/consumer.py`
