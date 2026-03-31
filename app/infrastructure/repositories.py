@@ -144,6 +144,54 @@ class PaymentRepository:
             .values(**values),
         )
 
+    async def acquire_webhook_lock(
+        self,
+        *,
+        payment_id: UUID,
+        lock_id: str,
+        lock_ttl_seconds: int,
+    ) -> bool:
+        """Acquire lock for webhook delivery to avoid duplicate side effects.
+
+        The lock is acquired if no lock exists, if previous lock is stale, or if
+        lock is already owned by the same lock_id.
+        """
+
+        lock_expired_before = datetime.now(UTC) - timedelta(seconds=lock_ttl_seconds)
+        stmt = (
+            update(Payment)
+            .where(
+                and_(
+                    Payment.id == payment_id,
+                    or_(
+                        Payment.webhook_lock_id.is_(None),
+                        Payment.webhook_locked_at.is_(None),
+                        Payment.webhook_locked_at < lock_expired_before,
+                        Payment.webhook_lock_id == lock_id,
+                    ),
+                ),
+            )
+            .values(
+                webhook_lock_id=lock_id,
+                webhook_locked_at=datetime.now(UTC),
+            )
+            .returning(Payment.id)
+        )
+        result = await self._session.execute(stmt)
+        return result.scalar_one_or_none() is not None
+
+    async def release_webhook_lock(self, *, payment_id: UUID, lock_id: str) -> None:
+        """Release webhook lock only if owned by the caller lock_id."""
+
+        await self._session.execute(
+            update(Payment)
+            .where(and_(Payment.id == payment_id, Payment.webhook_lock_id == lock_id))
+            .values(
+                webhook_lock_id=None,
+                webhook_locked_at=None,
+            ),
+        )
+
 
 class OutboxRepository:
     """Repository for outbox events with lock-based polling."""

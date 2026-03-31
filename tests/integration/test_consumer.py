@@ -96,6 +96,24 @@ async def test_consumer_moves_to_dlq_after_max_retries(monkeypatch: pytest.Monke
     assert kwargs["headers"]["x-last-error"] == "final error"
 
 
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_consumer_retry_uses_exponential_backoff_ttl(monkeypatch: pytest.MonkeyPatch) -> None:
+    message = _MessageStub(headers={"x-retry-count": "2"})
+    event = _event(uuid4(), "idem-retry-ttl", "https://merchant.local/webhook")
+
+    publish_mock = AsyncMock()
+    monkeypatch.setattr("app.consumer.broker.publish", publish_mock)
+
+    await _handle_retryable_error(event, cast(Any, message), 2, "temporary error")
+
+    publish_mock.assert_awaited_once()
+    assert publish_mock.await_args is not None
+    kwargs = publish_mock.await_args.kwargs
+    assert kwargs["headers"]["x-retry-count"] == "3"
+    assert kwargs["expiration"] == 4000
+
+
 async def _seed_payment(
     engine: async_sessionmaker[AsyncSession],
     *,

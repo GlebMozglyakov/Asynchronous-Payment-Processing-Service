@@ -55,7 +55,11 @@ Flow:
 
 - Webhook retry: 3 attempts, delays `1s`, `2s`, `4s` (configurable).
 - Consumer message retry: if processing raises retryable error, message is republished to retry exchange with TTL (`1s`, `2s`, `4s`).
-- After third retry is exhausted, message is published to DLQ.
+- Message flow is bounded and deterministic:
+  - original delivery has `x-retry-count=0`;
+  - failed attempts are republished with `x-retry-count=1..3`;
+  - when `x-retry-count` reaches configured max (`CONSUMER_RETRY_ATTEMPTS`), message is moved to DLQ;
+  - no infinite requeue loops are used.
 
 ### Idempotency policy
 
@@ -63,6 +67,7 @@ Flow:
 - `payments.idempotency_key` has unique constraint.
 - Creation uses `INSERT ... ON CONFLICT DO NOTHING` and returns existing payment if duplicate key is used.
 - Parallel identical requests return the same payment and do not create duplicate outbox messages.
+- Consumer-side duplicate deliveries are also controlled for webhook side effects by lock-based webhook coordination in DB.
 
 ## Repository structure
 
@@ -123,6 +128,7 @@ Compose uses `.env.example` directly as env file for `api` and `consumer`.
 | `WEBHOOK_TIMEOUT_SECONDS` | Per-request webhook timeout |
 | `WEBHOOK_RETRY_ATTEMPTS` | Webhook retry attempts |
 | `WEBHOOK_RETRY_BASE_DELAY_SECONDS` | Base delay for webhook retry backoff |
+| `WEBHOOK_LOCK_TTL_SECONDS` | TTL for webhook-side effect lock in DB |
 | `GATEWAY_SLEEP_MIN_SECONDS` | Gateway emulator min delay |
 | `GATEWAY_SLEEP_MAX_SECONDS` | Gateway emulator max delay |
 | `GATEWAY_SUCCESS_RATE` | Gateway success probability |
@@ -255,9 +261,11 @@ Covered scenarios include:
 - webhook retry/backoff
 - consumer status update and retry/DLQ flow
 - RabbitMQ topology declaration contract (exchange/queue/binding wiring)
+- API-key dependency behavior and health endpoint contract
 
 ## Notes and assumptions
 
 - Outbox relay runs inside API process as background task by design to keep compose topology minimal (`postgres`, `rabbitmq`, `api`, `consumer`).
 - Consumer retry is explicit (retry queue with TTL and dead-letter back to main exchange), not implicit broker redelivery.
 - If webhook fails after retries, processing is treated as retryable at consumer message level and message follows retry/DLQ policy.
+- Webhook delivery is guarded by a DB lock (`webhook_lock_id` / `webhook_locked_at`) so duplicate message deliveries do not trigger duplicate webhook side effects.

@@ -22,6 +22,7 @@ from app.infrastructure.messaging import (
     payments_routing_key,
     retry_exchange,
 )
+from app.infrastructure.retry import calculate_retry_delay_seconds
 from app.logging import configure_logging
 from app.schemas.events import PaymentCreatedEvent
 
@@ -75,6 +76,14 @@ async def _handle_retryable_error(
     retry_count: int,
     error_message: str,
 ) -> None:
+    """Republish a failed message to retry queue or move to DLQ.
+
+    `retry_count` comes from message headers and means "how many retries were
+    already attempted". Values are:
+    - 0 on first failure of the original message
+    - 1..N for retry messages
+    """
+
     if retry_count >= settings.consumer_retry_attempts:
         await _publish_to_dlq(event, retry_count, error_message)
         await message.ack()
@@ -89,7 +98,10 @@ async def _handle_retryable_error(
         return
 
     next_retry = retry_count + 1
-    delay_seconds = settings.consumer_retry_base_delay_seconds * (2 ** (next_retry - 1))
+    delay_seconds = calculate_retry_delay_seconds(
+        base_delay_seconds=settings.consumer_retry_base_delay_seconds,
+        retry_number=next_retry,
+    )
 
     await broker.publish(
         message=event.model_dump(mode="json"),

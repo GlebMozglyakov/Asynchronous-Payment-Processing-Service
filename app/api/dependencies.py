@@ -1,5 +1,7 @@
 """FastAPI dependencies shared by route handlers."""
 
+import secrets
+
 from fastapi import Header, Request, Security
 from fastapi.security import APIKeyHeader
 
@@ -17,7 +19,7 @@ async def require_api_key(request: Request, api_key: str | None = Security(api_k
     """Validate static API key for every endpoint."""
 
     settings: Settings = getattr(request.app.state, "settings", get_settings())
-    if api_key is None or api_key != settings.api_key:
+    if api_key is None or not secrets.compare_digest(api_key, settings.api_key):
         raise UnauthorizedError()
 
 

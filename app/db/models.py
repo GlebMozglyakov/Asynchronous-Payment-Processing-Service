@@ -48,6 +48,11 @@ class Payment(Base):
     )
     webhook_attempts: Mapped[int] = mapped_column(nullable=False, default=0)
     webhook_last_error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    webhook_lock_id: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)
+    webhook_locked_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True),
+        nullable=True,
+    )
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
         nullable=False,

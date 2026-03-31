@@ -159,3 +159,22 @@ async def test_missing_idempotency_key_returns_error(app_client: httpx.AsyncClie
 
     assert response.status_code == 400
     assert response.json()["error"] == "missing_idempotency_key"
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_healthcheck_requires_api_key_and_returns_service_info(
+    app_client: httpx.AsyncClient,
+) -> None:
+    unauthorized = await app_client.get("/health")
+    assert unauthorized.status_code == 401
+
+    authorized = await app_client.get(
+        "/health",
+        headers={"X-API-Key": "integration-api-key"},
+    )
+    assert authorized.status_code == 200
+    body = authorized.json()
+    assert body["status"] == "ok"
+    assert body["service"] == "Asynchronous Payment Processing Service"
+    assert body["version"] == "0.1.0"

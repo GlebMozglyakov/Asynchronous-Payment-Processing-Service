@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 from datetime import UTC, datetime
+from uuid import uuid4
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -104,6 +105,44 @@ class PaymentProcessor:
             failure_reason=failure_reason,
         )
 
+        webhook_lock_id = str(uuid4())
+        acquired = await self._payment_repo.acquire_webhook_lock(
+            payment_id=payment.id,
+            lock_id=webhook_lock_id,
+            lock_ttl_seconds=get_settings().webhook_lock_ttl_seconds,
+        )
+        await self._session.commit()
+
+        if not acquired:
+            logger.info(
+                "Webhook delivery lock is held by another worker; deferring message",
+                extra={"payment_id": str(payment.id)},
+            )
+            raise RetryableProcessingError(
+                "Webhook delivery is currently locked by another worker",
+            )
+
+        refreshed_payment = await self._payment_repo.get_by_id(event.payment_id)
+        if refreshed_payment is None:
+            await self._payment_repo.release_webhook_lock(
+                payment_id=payment.id,
+                lock_id=webhook_lock_id,
+            )
+            await self._session.commit()
+            raise PaymentNotFoundError(str(event.payment_id))
+
+        if refreshed_payment.webhook_delivered_at is not None:
+            await self._payment_repo.release_webhook_lock(
+                payment_id=refreshed_payment.id,
+                lock_id=webhook_lock_id,
+            )
+            await self._session.commit()
+            logger.info(
+                "Webhook already delivered, skipping duplicate delivery",
+                extra={"payment_id": str(refreshed_payment.id)},
+            )
+            return
+
         try:
             attempts = await self._webhook_client.send(payment.webhook_url, webhook_payload)
             await self._payment_repo.update_webhook_result(
@@ -112,13 +151,35 @@ class PaymentProcessor:
                 delivered=True,
                 last_error=None,
             )
+            await self._payment_repo.release_webhook_lock(
+                payment_id=payment.id,
+                lock_id=webhook_lock_id,
+            )
             await self._session.commit()
         except WebhookDeliveryError as exc:
+            logger.warning(
+                "Webhook delivery exhausted retries; scheduling message retry",
+                extra={
+                    "payment_id": str(payment.id),
+                    "webhook_url": payment.webhook_url,
+                },
+            )
             await self._payment_repo.update_webhook_result(
                 payment_id=payment.id,
                 attempts=get_settings().webhook_retry_attempts,
                 delivered=False,
                 last_error=str(exc),
             )
+            await self._payment_repo.release_webhook_lock(
+                payment_id=payment.id,
+                lock_id=webhook_lock_id,
+            )
             await self._session.commit()
             raise RetryableProcessingError(str(exc)) from exc
+        except Exception:
+            await self._payment_repo.release_webhook_lock(
+                payment_id=payment.id,
+                lock_id=webhook_lock_id,
+            )
+            await self._session.commit()
+            raise

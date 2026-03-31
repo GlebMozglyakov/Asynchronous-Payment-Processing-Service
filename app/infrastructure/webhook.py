@@ -7,6 +7,7 @@ import logging
 
 import httpx
 
+from app.infrastructure.retry import calculate_retry_delay_seconds
 from app.schemas.events import WebhookPayload
 
 logger = logging.getLogger(__name__)
@@ -68,7 +69,12 @@ class WebhookClient:
                     )
                     if attempt >= self._max_attempts:
                         break
-                    await asyncio.sleep(self._base_delay_seconds * (2 ** (attempt - 1)))
+                    await asyncio.sleep(
+                        calculate_retry_delay_seconds(
+                            base_delay_seconds=self._base_delay_seconds,
+                            retry_number=attempt,
+                        ),
+                    )
 
         raise WebhookDeliveryError(
             f"Unable to deliver webhook to {webhook_url} after {self._max_attempts} attempts",

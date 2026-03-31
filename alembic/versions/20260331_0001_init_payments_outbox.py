@@ -34,6 +34,8 @@ def upgrade() -> None:
         sa.Column("webhook_delivered_at", sa.DateTime(timezone=True), nullable=True),
         sa.Column("webhook_attempts", sa.Integer(), nullable=False, server_default="0"),
         sa.Column("webhook_last_error", sa.Text(), nullable=True),
+        sa.Column("webhook_lock_id", sa.String(length=64), nullable=True),
+        sa.Column("webhook_locked_at", sa.DateTime(timezone=True), nullable=True),
         sa.Column("created_at", sa.DateTime(timezone=True), nullable=False),
         sa.Column("processed_at", sa.DateTime(timezone=True), nullable=True),
         sa.PrimaryKeyConstraint("id"),
@@ -45,6 +47,7 @@ def upgrade() -> None:
         ),
     )
     op.create_index("ix_payments_idempotency_key", "payments", ["idempotency_key"])
+    op.create_index("ix_payments_webhook_lock_id", "payments", ["webhook_lock_id"])
 
     op.create_table(
         "outbox",
@@ -72,6 +75,7 @@ def upgrade() -> None:
 
 
 def downgrade() -> None:
+    op.drop_index("ix_payments_webhook_lock_id", table_name="payments")
     op.drop_index("ix_outbox_lock_id", table_name="outbox")
     op.drop_index("ix_outbox_status", table_name="outbox")
     op.drop_index("ix_outbox_aggregate_id", table_name="outbox")

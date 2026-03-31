@@ -43,6 +43,7 @@ class Settings(BaseSettings):
     webhook_timeout_seconds: float = 3.0
     webhook_retry_attempts: int = 3
     webhook_retry_base_delay_seconds: float = 1.0
+    webhook_lock_ttl_seconds: int = 120
 
     gateway_sleep_min_seconds: float = 2.0
     gateway_sleep_max_seconds: float = 5.0
